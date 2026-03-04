@@ -21,7 +21,7 @@ permissions: {}
 jobs:
   build:
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+     runs-on: ubuntu-22.04
     container:
       image: docker.io/zmkfirmware/zmk-build-arm:4.1
     needs: compile-matrix
