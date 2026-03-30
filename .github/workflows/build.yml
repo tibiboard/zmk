@@ -21,7 +21,7 @@ permissions: {}
 jobs:
   build:
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     container:
       image: docker.io/zmkfirmware/zmk-build-arm:4.1
     needs: compile-matrix
@@ -68,19 +68,13 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-
             const execSync = require('child_process').execSync;
-
             const buildShieldArgs = JSON.parse(`${{ matrix.shieldArgs }}`);
-
             let error = false;
-
             for (const shieldArgs of buildShieldArgs) {
               try {
                 console.log(`::group::${{ matrix.board}} ${shieldArgs.shield} Build`)
-
                 const output = execSync(`west build -s app -p -b ${{ matrix.board }} ${shieldArgs.snippet ? '-S ' + shieldArgs.snippet : ''} -- ${shieldArgs.shield ? '-DSHIELD="' + shieldArgs.shield + '"' : ''} ${shieldArgs['cmake-args'] || ''}`);
-
                 console.log(output.toString());
               } catch (e) {
                 console.error(`::error::Failed to build ${{ matrix.board }} ${shieldArgs.shield} ${shieldArgs['cmake-args']}`);
@@ -90,7 +84,6 @@ jobs:
                 console.log('::endgroup::');
               }
             }
-
             if (error) {
               throw new Error('Failed to build one or more configurations');
             }
@@ -102,29 +95,21 @@ jobs:
           script: |
             const fs = require('fs');
             const {default: artifact} = require('@actions/artifact');
-
             const buildShieldArgs = JSON.parse(`${{ matrix.shieldArgs }}`);
-
             let error = false;
-
             for (const shieldArgs of buildShieldArgs) {
               try {
                 console.log(`::group::${{ matrix.board}} ${shieldArgs.shield} Upload`)
-
                 const fileExtensions = ["hex", "uf2"];
-
                 const files = fileExtensions
                   .map(extension => "build/zephyr/zmk." + extension)
                   .filter(path => fs.existsSync(path));
-
                 const rootDirectory = 'build/zephyr';
                 const options = {
                     continueOnError: true
                 }
-
                 const cmakeName = shieldArgs['cmake-args'] ? '-' + (shieldArgs.nickname || shieldArgs['cmake-args'].split(' ').join('')) : '';
                 const artifactName = `${{ matrix.board }}${shieldArgs.shield ? '-' + shieldArgs.shield : ''}${cmakeName}-zmk`.replaceAll('/', '_');
-
                 await artifact.uploadArtifact(artifactName, files, rootDirectory, options);
               } catch (e) {
                 console.error(`::error::Failed to upload ${{ matrix.board }} ${shieldArgs.shield} ${shieldArgs['cmake-args']}`);
@@ -134,13 +119,13 @@ jobs:
                 console.log('::endgroup::');
               }
             }
-
             if (error) {
               throw new Error('Failed to build one or more configurations');
             }
+
   compile-matrix:
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [core-coverage, board-changes, nightly]
     outputs:
       include-list: ${{ steps.compile-list.outputs.result }}
@@ -153,20 +138,16 @@ jobs:
             const coreCoverage = `${{ needs.core-coverage.outputs.core-include }}` || "[]";
             const boardChanges = `${{ needs.board-changes.outputs.boards-include }}` || "[]";
             const nightly = `${{ needs.nightly.outputs.nightly-include }}` || "[]";
-
             const combined = [
               ...JSON.parse(coreCoverage),
               ...JSON.parse(boardChanges),
               ...JSON.parse(nightly)
             ];
             const combinedUnique = [...new Map(combined.map(el => [JSON.stringify(el), el])).values()];
-
             const perBoard = {};
-
             for (const configuration of combinedUnique) {
               if (!perBoard[configuration.board])
                 perBoard[configuration.board] = [];
-
               perBoard[configuration.board].push({
                 shield: configuration.shield,
                 'cmake-args': configuration['cmake-args'],
@@ -174,14 +155,14 @@ jobs:
                 nickname: configuration.nickname
               })
             }
-
             return Object.entries(perBoard).map(([board, shieldArgs]) => ({
               board,
               shieldArgs: JSON.stringify(shieldArgs),
             }));
+
   core-coverage:
     if: ${{ needs.get-changed-files.outputs.core-changes == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: get-changed-files
     outputs:
       core-include: ${{ steps.core-list.outputs.result }}
@@ -202,17 +183,15 @@ jobs:
           script: |
             const fs = require('fs');
             const yaml = require('js-yaml');
-
             const coreCoverage = yaml.load(fs.readFileSync('app/core-coverage.yml', 'utf8'));
-
             let include = coreCoverage.board.flatMap(board =>
               coreCoverage.shield.map(shield => ({ board, shield }))
             );
-
             return [...include, ...coreCoverage.include];
+
   board-changes:
     if: ${{ needs.get-changed-files.outputs.board-changes == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [get-grouped-hardware, get-changed-files]
     outputs:
       boards-include: ${{ steps.boards-list.outputs.result }}
@@ -231,19 +210,15 @@ jobs:
           script: |
             const fs = require('fs');
             const yaml = require('js-yaml');
-
             const changedFiles = JSON.parse(`${{ needs.get-changed-files.outputs.changed-files }}`);
             const metadata = JSON.parse(`${{ needs.get-grouped-hardware.outputs.organized-metadata }}`);
             const boardChanges = new Set(changedFiles.filter(f => f.startsWith('app/boards')).map(f => f.split('/').slice(0, 4).join('/')));
-
             return (await Promise.all([...boardChanges].flatMap(async bc => {
               const globber = await glob.create(bc + "/*.zmk.yml");
               const files = await globber.glob();
-
               const aggregated = files.flatMap((f) =>
                 yaml.loadAll(fs.readFileSync(f, "utf8"))
               );
-
               const boardAndShield = (b, s) => {
                 if (s.siblings) {
                   return s.siblings.map(shield => ({
@@ -257,7 +232,6 @@ jobs:
                   };
                 }
               }
-
               return aggregated.flatMap(hm => {
                 switch (hm.type) {
                   case "board":
@@ -295,9 +269,10 @@ jobs:
                 }
               });
             }))).flat();
+
   nightly:
     if: ${{ github.event_name == 'schedule' && github.repository_owner == 'zmkfirmware' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: get-grouped-hardware
     outputs:
       nightly-include: ${{ steps.nightly-list.outputs.result }}
@@ -308,7 +283,6 @@ jobs:
         with:
           script: |
             const metadata = JSON.parse(`${{ needs.get-grouped-hardware.outputs.organized-metadata }}`);
-
             let includeOnboard = metadata.onboard.flatMap(b => {
               if (b.siblings) {
                 return b.siblings.map(board => ({
@@ -320,7 +294,6 @@ jobs:
                 };
               }
             });
-
             let includeInterconnect = Object.values(metadata.interconnects).flatMap(i =>
               i.boards.flatMap(b =>
                 i.shields.flatMap(s => {
@@ -338,10 +311,10 @@ jobs:
                 })
               )
             );
-
             return [...includeOnboard, ...includeInterconnect];
+
   get-grouped-hardware:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       organized-metadata: ${{ steps.organize-metadata.outputs.result }}
     steps:
@@ -362,24 +335,19 @@ jobs:
           script: |
             const fs = require('fs');
             const yaml = require('js-yaml');
-
             const globber = await glob.create("app/boards/**/*.zmk.yml");
             const files = await globber.glob();
-
             const aggregated = files.flatMap((f) =>
               yaml.loadAll(fs.readFileSync(f, "utf8"))
             );
-
             return JSON.stringify(aggregated).replace(/\\/g,"\\\\").replace(/`/g,"\\`");
           result-encoding: string
-
       - name: Organize Metadata
         uses: actions/github-script@v7
         id: organize-metadata
         with:
           script: |
             const hardware = JSON.parse(`${{ steps.aggregate-metadata.outputs.result }}`);
-
             const grouped = hardware.reduce((agg, hm) => {
               switch (hm.type) {
                 case "board":
@@ -416,12 +384,12 @@ jobs:
               return agg;
             },
             { onboard: [], interconnects: {} });
-
             return JSON.stringify(grouped).replace(/\\/g,"\\\\").replace(/`/g,"\\`");
           result-encoding: string
+
   get-changed-files:
     if: ${{ github.event_name != 'schedule' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       changed-files: ${{ steps.changed-files.outputs.all_changed_files }}
       board-changes: ${{ steps.board-changes.outputs.result }}
@@ -431,7 +399,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: tj-actions/changed-files@9200e69727eb73eb060652b19946b8a2fdfb654b # pin to v45.0.8 due to https://github.com/tj-actions/changed-files/issues/2463 https://www.stepsecurity.io/blog/harden-runner-detection-tj-actions-changed-files-action-is-compromised
+      - uses: tj-actions/changed-files@9200e69727eb73eb060652b19946b8a2fdfb654b
         id: changed-files
         with:
           json: true
