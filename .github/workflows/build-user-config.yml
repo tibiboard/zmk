@@ -40,16 +40,16 @@ jobs:
           yq -oj "${{ inputs.build_matrix_path }}"
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     container:
-      image: zmkfirmware/zmk-build-arm:stable
+      image: zmkfirmware/zmk-build-arm:4.1
     needs: matrix
     name: Build
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.build_matrix) }}
     steps:
-      - name: Act Workaround # https://github.com/nektos/act/issues/973
+      - name: Act Workaround
         if: ${{ env.ACT }}
         run: |
           apt-get update && apt-get install -y curl unzip
@@ -138,56 +138,6 @@ jobs:
         shell: sh -x {0}
         run: west build -s zmk/app -d "${{ env.build_dir }}" -b "${{ matrix.board }}" ${{ env.extra_west_args }} -- -DZMK_CONFIG=${{ env.base_dir }}/${{ inputs.config_path }} ${{ env.extra_cmake_args }} ${{ matrix.cmake-args }}
 
-      - name: Warn about building from main if build fails
-        if: failure() && env.zmk_revision == 'main'
-        run: |
-          echo "# Consider Pinning ZMK" >> $GITHUB_STEP_SUMMARY
-          echo "Your recent build failure might be the result of breaking changes made to ZMK's main branch." >> $GITHUB_STEP_SUMMARY
-          echo "Consider [pinning your ZMK version](https://zmk.dev/blog/2025/06/20/pinned-zmk) to a release for increased stability." >> $GITHUB_STEP_SUMMARY
-          echo "See also the [list of released versions](https://github.com/zmkfirmware/zmk/releases)." >> $GITHUB_STEP_SUMMARY
-          echo "If you wish to stay on main, check the most recent pending release PR for breaking changes. [Our blog](https://zmk.dev/blog) may have upgrade information if breaking changes are significant." >> $GITHUB_STEP_SUMMARY
-
-      - name: Check if building a board without explicit ZMK compat
-        if: always()
-        working-directory: ${{ env.base_dir }}/zmk/app
-        run: |
-          if ! (grep "CONFIG_ZMK_BOARD_COMPAT=y" "${{ env.build_dir }}/zephyr/.config" > /dev/null)
-          then
-            original_board=$(echo "${{ matrix.board }}" | sed -e 's$/.*$$')
-            west boards --board-root module --board-root . --board "${original_board}" --format "{qualifiers}" | grep "zmk" > /dev/null
-
-            if [ $? -ne 0 ]
-            then
-              echo "::warning file=build/zephyr/.config,title=Missing ZMK Compat::The selected board does not report explicit ZMK compat. Please verify you've selected the correct board and ZMK variant if one exists"
-            else
-              echo "::error file=build/zephyr/.config,title=Missing ZMK Compat::The selected board is not set up for ZMK and there is a ZMK variant available. See https://zmk.dev/blog/2025/12/09/zephyr-4-1#zmk-board-variant."
-              exit 1
-            fi
-          fi
-
-      - name: ${{ env.display_name }} Kconfig file
-        run: |
-          if [ -f "${{ env.build_dir }}/zephyr/.config" ]
-          then
-            grep -v -e "^#" -e "^$" "${{ env.build_dir }}/zephyr/.config" | sort
-          else
-            echo "No Kconfig output"
-          fi
-        if: ${{ !cancelled() }}
-
-      - name: ${{ env.display_name }} Devicetree file
-        run: |
-          if [ -f "${{ env.build_dir }}/zephyr/zephyr.dts" ]
-          then
-            cat "${{ env.build_dir }}/zephyr/zephyr.dts"
-          elif [ -f "${{ env.build_dir }}/zephyr/zephyr.dts.pre" ]
-          then
-            cat -s "${{ env.build_dir }}/zephyr/zephyr.dts.pre"
-          else
-            echo "No Devicetree output"
-          fi
-        if: ${{ !cancelled() }}
-
       - name: Rename artifacts
         shell: sh -x {0}
         run: |
@@ -207,7 +157,7 @@ jobs:
           path: ${{ env.build_dir }}/artifacts
 
   merge:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: build
     name: Merge Output Artifacts
     steps:
