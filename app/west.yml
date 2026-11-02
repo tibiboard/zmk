@@ -41,8 +41,9 @@ manifest:
       path: modules/lib/gui/lvgl
       remote: zmkfirmware
     # studio-extras: protocol with the extra subsystems (combos / tap-dances / macros / status /
-    # timing). Branch studio-extras of tibiboard/zmk-studio-messages.
+    # timing). Branch studio-extras of tibiboard/zmk-studio-messages-extras.
     - name: zmk-studio-messages
+      repo-path: zmk-studio-messages-extras
       revision: ac812379d6dae80b109bb629de8e26329bbbe019
       path: modules/msgs/zmk-studio-messages
       remote: tibiboard
