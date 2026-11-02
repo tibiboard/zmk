@@ -95,6 +95,49 @@ config ZMK_STUDIO_RPC_TX_BUF_SIZE
     int "TX Buffer Size"
     default 64
 
+config ZMK_STUDIO_COMBOS
+    bool "Combo editing support"
+    default y
+    help
+      Add RPC support for listing and editing combos via ZMK Studio: key positions, timeout,
+      require-prior-idle, slow-release and the bound behavior are editable in place (effective
+      immediately) and persisted to settings so they survive a power cycle.
+
+config ZMK_STUDIO_TAP_DANCES
+    bool "Tap dance editing support"
+    default y
+    depends on ZMK_BEHAVIOR_TAP_DANCE
+    help
+      Add RPC support for listing and editing tap-dance behaviors via ZMK Studio: the
+      tapping term and the binding for each tap count are editable in place (effective
+      immediately) and persisted to settings so they survive a power cycle.
+
+config ZMK_STUDIO_STATUS
+    bool "Status reporting support (battery/layer/key-event live info)"
+    default y
+    help
+      Add RPC support for reading battery level and receiving live layer-state and
+      key-position event notifications via ZMK Studio (powers the app's battery gauge,
+      live layer highlighting and typing statistics).
+
+config ZMK_STUDIO_TIMING
+    bool "Tapping term runtime adjustment support"
+    default y
+    help
+      Add RPC support for reading/writing a runtime override of the hold-tap
+      tapping term, plus near-boundary decision counters used by the app to
+      suggest a personalized tapping term (chibiboard v1.1 feature).
+
+config ZMK_STUDIO_MACROS
+    bool "Macro editing support"
+    default y
+    depends on ZMK_BEHAVIOR_MACRO
+    help
+      Add RPC support for listing and editing macro behaviors via ZMK Studio: the default
+      wait/tap timing and each step's binding are editable in place (effective immediately)
+      and persisted to settings so they survive a power cycle. The number of steps per
+      macro stays fixed.
+
 endif
 
 endif

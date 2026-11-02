@@ -951,21 +951,36 @@ static void split_central_connected(struct bt_conn *conn, uint8_t conn_err) {
 static void split_central_disconnected(struct bt_conn *conn, uint8_t reason) {
     char addr[BT_ADDR_LE_STR_LEN];
     int err;
+    struct bt_conn_info info;
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
     LOG_DBG("Disconnected: %s (reason %d)", addr, reason);
 
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
-    struct peripheral_event_wrapper ev = {
-        .source = peripheral_slot_index_for_conn(conn),
-        .event = {.type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT,
-                  .data = {.battery_event = {
-                               .level = 0,
-                           }}}};
+    bt_conn_get_info(conn, &info);
 
-    k_msgq_put(&peripheral_event_msgq, &ev, K_NO_WAIT);
-    k_work_submit(&peripheral_event_work);
+    if (info.role != BT_CONN_ROLE_CENTRAL) {
+        LOG_DBG("SKIPPING FOR ROLE %d", info.role);
+        return;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+    int slot_idx = peripheral_slot_index_for_conn(conn);
+
+    if (slot_idx < 0) {
+        LOG_WRN("No peripheral slot found for disconnected conn (%d), skipping battery event",
+                slot_idx);
+    } else {
+        struct peripheral_event_wrapper ev = {
+            .source = (uint8_t)slot_idx,
+            .event = {.type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT,
+                      .data = {.battery_event = {
+                                   .level = 0,
+                               }}}};
+
+        k_msgq_put(&peripheral_event_msgq, &ev, K_NO_WAIT);
+        k_work_submit(&peripheral_event_work);
+    }
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)

@@ -87,6 +87,10 @@ KEYMAP_VAR(zmk_stock_keymap, const, 0)
 static char zmk_keymap_layer_names[ZMK_KEYMAP_LAYERS_LEN][CONFIG_ZMK_KEYMAP_LAYER_NAME_MAX_LEN] = {
     ZMK_KEYMAP_LAYERS_FOREACH_SEP(LAYER_NAME, (, ))};
 
+/* FW48 (10/11 アストラ8本目⑬): 出荷時のレイヤー名。「デフォルトに戻す」で今の名前をこれに戻す */
+static const char *const zmk_stock_layer_names[ZMK_KEYMAP_LAYERS_LEN] = {
+    ZMK_KEYMAP_LAYERS_FOREACH_SEP(LAYER_NAME, (, ))};
+
 static uint32_t changed_layer_names = 0;
 
 #else
@@ -614,6 +618,11 @@ static void reload_from_stock_keymap(void) {
 int zmk_keymap_discard_changes(void) {
     load_stock_keymap_layer_ordering();
     reload_from_stock_keymap();
+    /* FW48 (10/11 アストラ10本目⑩): 名前も出荷時に戻してから、保存してある名前を重ねる。
+     * 前はまだ保存したことの無いレイヤーの名前を変えて保存に失敗すると、取り消しても仮の名前が残った */
+    for (int l = 0; l < ZMK_KEYMAP_LAYERS_LEN; l++) {
+        strlcpy(zmk_keymap_layer_names[l], zmk_stock_layer_names[l], CONFIG_ZMK_KEYMAP_LAYER_NAME_MAX_LEN);
+    }
 
     int ret = settings_load_subtree("keymap");
     if (ret >= 0) {
@@ -653,31 +662,49 @@ static int keymap_track_changed_bindings(const char *key, size_t len, settings_r
 }
 
 int zmk_keymap_reset_settings(void) {
-    settings_delete(LAYER_ORDER_SETTINGS_KEY);
+    /* FW48 (10/11 アストラ10本目⑧): 消せなかった物があれば失敗をアプリへ返す(前は必ず成功と返していた) */
+    int first_err = 0;
+#define KEYMAP_RESET_DEL(name)                                                                     \
+    do {                                                                                           \
+        int _r = settings_delete(name);                                                            \
+        if (_r < 0 && _r != -ENOENT && first_err == 0) {                                           \
+            LOG_ERR("Failed to delete %s (%d)", name, _r);                                         \
+            first_err = _r;                                                                        \
+        }                                                                                          \
+    } while (0)
+    KEYMAP_RESET_DEL(LAYER_ORDER_SETTINGS_KEY);
 
-    uint8_t zmk_keymap_layer_changes[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE];
+    /* FW48 (10/11): 0 で始める(前は初期値なしで、保存領域に無いキーまで消しに行くことがあった) */
+    uint8_t zmk_keymap_layer_changes[ZMK_KEYMAP_LAYERS_LEN][PENDING_ARRAY_SIZE] = {0};
 
-    settings_load_subtree_direct("keymap", keymap_track_changed_bindings,
-                                 &zmk_keymap_layer_changes);
+    int list_rc = settings_load_subtree_direct("keymap", keymap_track_changed_bindings,
+                                               &zmk_keymap_layer_changes);
+    /* FW48 (10/11 アストラ14本目⑥): 一覧を読めないと消す対象が欠けるので、失敗として返す */
+    if (list_rc < 0 && first_err == 0) {
+        LOG_ERR("Failed to list keymap settings (%d)", list_rc);
+        first_err = list_rc;
+    }
 
     for (int l = 0; l < ZMK_KEYMAP_LAYERS_LEN; l++) {
         char layer_name_setting_name[14];
         sprintf(layer_name_setting_name, LAYER_NAME_SETTINGS_KEY, l);
-        settings_delete(layer_name_setting_name);
+        KEYMAP_RESET_DEL(layer_name_setting_name);
+        /* FW48 (10/11 アストラ8本目⑬): 保存した名前だけでなく、今の名前も出荷時の名前に戻す。
+         * 前は電源を入れ直すまで、アプリで読み直しても変えた後の名前のままだった */
+        strlcpy(zmk_keymap_layer_names[l], zmk_stock_layer_names[l], CONFIG_ZMK_KEYMAP_LAYER_NAME_MAX_LEN);
+        WRITE_BIT(changed_layer_names, l, 0);
 
         uint8_t *changes = zmk_keymap_layer_changes[l];
 
         for (int k = 0; k < ZMK_KEYMAP_LEN; k++) {
-            if (memcmp(&zmk_keymap[l][k], &zmk_stock_keymap[l][k],
-                       sizeof(struct zmk_behavior_binding_setting)) == 0) {
-                continue;
-            }
-
+            /* FW48 (10/11 アストラ11本目①): 今のキー(RAM)が出荷時と同じかどうかでは飛ばさない。
+             * 保存領域に入っている物は全部消す。前は1回目に消せずに RAM だけ出荷時に戻ると、
+             * 2回目の「デフォルトに戻す」で「同じ」と見て消すのを飛ばし、電源を入れ直すと古い配置が戻った */
             if (changes[k / 8] & BIT(k % 8)) {
                 LOG_WRN("CLEAR %d on %d layer", k, l);
                 char setting_name[20];
                 sprintf(setting_name, LAYER_BINDING_SETTINGS_KEY, l, k);
-                settings_delete(setting_name);
+                KEYMAP_RESET_DEL(setting_name);
             }
         }
     }
@@ -686,7 +713,8 @@ int zmk_keymap_reset_settings(void) {
 
     reload_from_stock_keymap();
 
-    return 0;
+#undef KEYMAP_RESET_DEL
+    return first_err;
 }
 
 #else
@@ -841,6 +869,12 @@ ZMK_SUBSCRIPTION(keymap, zmk_sensor_event);
 
 #if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
 
+// NOTE: like every settings h_set callback in this firmware, this must return 0 (skip with a
+// warning) for malformed/legacy/out-of-range entries rather than an error: with the NVS backend a
+// nonzero return aborts the remainder of the ENTIRE settings load (all subsystems, newest-first
+// iteration), silently reverting every not-yet-loaded setting to compiled-in defaults for that
+// boot. Entries saved against an older layout (more layers/positions) are expected to show up
+// here across firmware updates. See behavior_handle_set() in app/src/behavior.c.
 static int keymap_handle_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg) {
     const char *next;
 
@@ -851,19 +885,22 @@ static int keymap_handle_set(const char *name, size_t len, settings_read_cb read
         zmk_keymap_layer_id_t layer = strtoul(next, &endptr, 10);
 
         if (*endptr != '\0') {
-            LOG_WRN("Invalid layer number: %s with endptr %s", next, endptr);
-            return -EINVAL;
+            LOG_WRN("Skipping invalid layer number: %s with endptr %s", next, endptr);
+            return 0;
         }
 
         if (layer >= ZMK_KEYMAP_LAYERS_LEN) {
-            LOG_WRN("Found layer name for invalid layer ID %d", layer);
+            // Also guards the zmk_keymap_layer_names[layer] writes below from indexing out of
+            // bounds (upstream only logged here and wrote anyway).
+            LOG_WRN("Ignoring saved layer name for invalid layer ID %d", layer);
+            return 0;
         }
 
         int ret = read_cb(cb_arg, zmk_keymap_layer_names[layer],
                           MIN(len, CONFIG_ZMK_KEYMAP_LAYER_NAME_MAX_LEN - 1));
         if (ret <= 0) {
-            LOG_ERR("Failed to handle keymap layer name from settings (err %d)", ret);
-            return ret;
+            LOG_ERR("Failed to read keymap layer name from settings (err %d), skipping", ret);
+            return 0;
         }
 
         zmk_keymap_layer_names[layer][ret] = 0;
@@ -871,38 +908,40 @@ static int keymap_handle_set(const char *name, size_t len, settings_read_cb read
         char *endptr;
         uint8_t layer = strtoul(next, &endptr, 10);
         if (*endptr != '/') {
-            LOG_WRN("Invalid layer number: %s with endptr %s", next, endptr);
-            return -EINVAL;
+            LOG_WRN("Skipping invalid layer number: %s with endptr %s", next, endptr);
+            return 0;
         }
 
         uint8_t key_position = strtoul(endptr + 1, &endptr, 10);
 
         if (*endptr != '\0') {
-            LOG_WRN("Invalid key_position number: %s with endptr %s", next, endptr);
-            return -EINVAL;
+            LOG_WRN("Skipping invalid key_position number: %s with endptr %s", next, endptr);
+            return 0;
         }
 
         if (len > sizeof(struct zmk_behavior_binding_setting)) {
-            LOG_ERR("Too large binding setting size (got %d expected %d)", len,
-                    sizeof(struct zmk_behavior_binding_setting));
-            return -EINVAL;
+            LOG_WRN("Skipping too large binding setting size (got %d expected %d)", (int)len,
+                    (int)sizeof(struct zmk_behavior_binding_setting));
+            return 0;
         }
 
         if (layer >= ZMK_KEYMAP_LAYERS_LEN) {
-            LOG_WRN("Layer %d is larger than max of %d", layer, ZMK_KEYMAP_LAYERS_LEN);
-            return -EINVAL;
+            LOG_WRN("Ignoring saved binding for layer %d larger than max of %d", layer,
+                    ZMK_KEYMAP_LAYERS_LEN);
+            return 0;
         }
 
         if (key_position >= ZMK_KEYMAP_LEN) {
-            LOG_WRN("Key position %d is larger than max of %d", key_position, ZMK_KEYMAP_LEN);
-            return -EINVAL;
+            LOG_WRN("Ignoring saved binding for key position %d larger than max of %d",
+                    key_position, ZMK_KEYMAP_LEN);
+            return 0;
         }
 
         struct zmk_behavior_binding_setting binding_setting = {0};
         int err = read_cb(cb_arg, &binding_setting, len);
         if (err <= 0) {
-            LOG_ERR("Failed to handle keymap binding from settings (err %d)", err);
-            return err;
+            LOG_ERR("Failed to read keymap binding from settings (err %d), skipping", err);
+            return 0;
         }
 
         const char *name =
@@ -927,8 +966,8 @@ static int keymap_handle_set(const char *name, size_t len, settings_read_cb read
         int err =
             read_cb(cb_arg, settings_layer_orders, MIN(len, ARRAY_SIZE(settings_layer_orders)));
         if (err <= 0) {
-            LOG_ERR("Failed to handle keymap layer orders from settings (err %d)", err);
-            return err;
+            LOG_ERR("Failed to read keymap layer orders from settings (err %d), skipping", err);
+            return 0;
         }
 
         LOG_HEXDUMP_DBG(settings_layer_orders, ARRAY_SIZE(settings_layer_orders),

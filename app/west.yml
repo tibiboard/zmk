@@ -4,6 +4,8 @@ manifest:
       url-base: https://github.com/zephyrproject-rtos
     - name: zmkfirmware
       url-base: https://github.com/zmkfirmware
+    - name: tibiboard
+      url-base: https://github.com/tibiboard
   projects:
     - name: zephyr
       remote: zmkfirmware
@@ -38,10 +40,12 @@ manifest:
       revision: f1db87ee98f1810328a8419572fa42a3b5f352ae
       path: modules/lib/gui/lvgl
       remote: zmkfirmware
+    # studio-extras: protocol with the extra subsystems (combos / tap-dances / macros / status /
+    # timing). Branch studio-extras of tibiboard/zmk-studio-messages.
     - name: zmk-studio-messages
-      revision: 6cb4c283e76209d59c45fbcb218800cd19e9339d
+      revision: ac812379d6dae80b109bb629de8e26329bbbe019
       path: modules/msgs/zmk-studio-messages
-      remote: zmkfirmware
+      remote: tibiboard
   group-filter: [+optional]
   self:
     west-commands: scripts/west-commands.yml

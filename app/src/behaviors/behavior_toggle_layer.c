@@ -15,6 +15,11 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
+/* ちびボード FW46 (2026-10-04): トグルで入ったレイヤーから戻る時も振動させるための印。
+ * 実体は shield の vibe_handler.c(CONFIG_TIBIBOARD_STICKY_LAYER_RETURN=y の時だけ)。無ければ何もしない。 */
+__attribute__((weak)) void tibiboard_layer_sticky_begin(void) {}
+__attribute__((weak)) void tibiboard_layer_sticky_end(void) {}
+
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 
 enum toggle_mode {
@@ -33,16 +38,25 @@ static int tog_keymap_binding_pressed(struct zmk_behavior_binding *binding,
     LOG_DBG("position %d layer %d", event.position, binding->param1);
 
     const struct behavior_tog_config *cfg = zmk_behavior_get_binding(binding->behavior_dev)->config;
+    int ret;
+    /* ちびボード FW46: このキーで入った/抜けたレイヤーに印を付ける(戻る時の振動用) */
+    tibiboard_layer_sticky_begin();
     switch (cfg->toggle_mode) {
     case ON:
-        return zmk_keymap_layer_activate(binding->param1, cfg->locking);
+        ret = zmk_keymap_layer_activate(binding->param1, cfg->locking);
+        break;
     case OFF:
-        return zmk_keymap_layer_deactivate(binding->param1, cfg->locking);
+        ret = zmk_keymap_layer_deactivate(binding->param1, cfg->locking);
+        break;
     case FLIP:
-        return zmk_keymap_layer_toggle(binding->param1, cfg->locking);
+        ret = zmk_keymap_layer_toggle(binding->param1, cfg->locking);
+        break;
     default:
-        return -ENOTSUP;
+        ret = -ENOTSUP;
+        break;
     };
+    tibiboard_layer_sticky_end();
+    return ret;
 }
 
 static int tog_keymap_binding_released(struct zmk_behavior_binding *binding,

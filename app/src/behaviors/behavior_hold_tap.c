@@ -401,7 +401,12 @@ static inline const char *decision_moment_str(enum decision_moment decision_mome
     }
 }
 
+/* ちびボード FW26 (2026-09-13): 長押し/タップが確定した瞬間の通知(weak。シールド側 vibe_handler.c が実体を持つ)。
+ * position = キーの位置(0〜)。is_hold = true なら長押し確定、false ならタップ確定。 */
+__attribute__((weak)) void tibiboard_hold_tap_decided(uint32_t position, bool is_hold) {}
+
 static int press_hold_binding(struct active_hold_tap *hold_tap) {
+    tibiboard_hold_tap_decided(hold_tap->position, true); /* ちびボード FW26 */
     struct zmk_behavior_binding_event event = {
         .position = hold_tap->position,
         .timestamp = hold_tap->timestamp,
@@ -426,6 +431,7 @@ static int press_tap_binding(struct active_hold_tap *hold_tap) {
 
     struct zmk_behavior_binding binding = {.behavior_dev = hold_tap->config->tap_behavior_dev,
                                            .param1 = hold_tap->param_tap};
+    tibiboard_hold_tap_decided(hold_tap->position, false); /* ちびボード FW26 */
     store_last_hold_tapped(hold_tap);
     return zmk_behavior_invoke_binding(&binding, event, true);
 }
@@ -603,6 +609,30 @@ static void update_hold_status_for_retro_tap(uint32_t ignore_position) {
     }
 }
 
+// --- chibiboard: タッピングタームのランタイム上書き+きわどい判定カウンタ ---
+// timing_subsystem.c(Studio RPC)から設定/参照される。override 0 = 上書きなし(DTS値)。
+// カウンタは「判定境界の±50ms で決着した打鍵」を数える。境界ぎわの打鍵が多い
+// = ユーザーの自然な押し時間としきい値が近すぎる、のサインとしてアプリが提案に使う。
+int32_t tibiboard_tapping_term_override;
+uint32_t tibiboard_ht_default_term_ms;
+uint32_t tibiboard_ht_total_taps, tibiboard_ht_near_taps;
+uint32_t tibiboard_ht_total_holds, tibiboard_ht_near_holds;
+static inline int32_t tibiboard_effective_term(int32_t dts_term) {
+    tibiboard_ht_default_term_ms = dts_term;
+    return tibiboard_tapping_term_override > 0 ? tibiboard_tapping_term_override : dts_term;
+}
+#define TIBIBOARD_NEAR_MS 50
+/* 誤爆アナリティクス(2026-07-23): 判定の決着をキー位置つきで通知するフック。
+ * 実体はstudio/timing_subsystem.c(centralのみ)。周辺機ビルドではこのweakのまま何もしない。
+ * status: 0=タップ判定 1=時間経過ホールド 2=巻き込みホールド(HOLD_INTERRUPT) */
+__attribute__((weak)) void tibiboard_misfire_note_decision(uint32_t position, uint8_t status,
+                                                           uint32_t dur_ms, uint32_t term_ms) {
+    ARG_UNUSED(position);
+    ARG_UNUSED(status);
+    ARG_UNUSED(dur_ms);
+    ARG_UNUSED(term_ms);
+}
+
 static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
                                        struct zmk_behavior_binding_event event) {
     const struct device *dev = zmk_behavior_get_binding(binding->behavior_dev);
@@ -634,7 +664,8 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
 
     // if this behavior was queued we have to adjust the timer to only
     // wait for the remaining time.
-    int32_t tapping_term_ms_left = (hold_tap->timestamp + cfg->tapping_term_ms) - k_uptime_get();
+    int32_t tapping_term_ms_left =
+        (hold_tap->timestamp + tibiboard_effective_term(cfg->tapping_term_ms)) - k_uptime_get();
     k_work_schedule(&hold_tap->work, K_MSEC(tapping_term_ms_left));
 
     return ZMK_BEHAVIOR_OPAQUE;
@@ -651,11 +682,40 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
     // If these events were queued, the timer event may be queued too late or not at all.
     // We insert a timer event before the TH_KEY_UP event to verify.
     int work_cancel_result = k_work_cancel_delayable(&hold_tap->work);
-    if (event.timestamp > (hold_tap->timestamp + hold_tap->config->tapping_term_ms)) {
+    if (event.timestamp >
+        (hold_tap->timestamp + tibiboard_effective_term(hold_tap->config->tapping_term_ms))) {
         decide_hold_tap(hold_tap, HT_TIMER_EVENT);
     }
 
     decide_hold_tap(hold_tap, HT_KEY_UP);
+
+    // chibiboard: きわどい判定カウンタ(判定境界±50msで決着した打鍵を記録)
+    {
+        int64_t tb_dur = event.timestamp - hold_tap->timestamp;
+        int32_t tb_term = tibiboard_effective_term(hold_tap->config->tapping_term_ms);
+        switch (hold_tap->status) {
+        case STATUS_TAP:
+            tibiboard_ht_total_taps++;
+            if (tb_dur >= tb_term - TIBIBOARD_NEAR_MS) {
+                tibiboard_ht_near_taps++;
+            }
+            tibiboard_misfire_note_decision(event.position, 0, (uint32_t)tb_dur, (uint32_t)tb_term);
+            break;
+        case STATUS_HOLD_TIMER:
+            tibiboard_ht_total_holds++;
+            if (tb_dur <= tb_term + TIBIBOARD_NEAR_MS) {
+                tibiboard_ht_near_holds++;
+            }
+            tibiboard_misfire_note_decision(event.position, 1, (uint32_t)tb_dur, (uint32_t)tb_term);
+            break;
+        case STATUS_HOLD_INTERRUPT:
+            tibiboard_ht_total_holds++;
+            tibiboard_misfire_note_decision(event.position, 2, (uint32_t)tb_dur, (uint32_t)tb_term);
+            break;
+        default:
+            break;
+        }
+    }
     decide_retro_tap(hold_tap);
     release_binding(hold_tap);
 
@@ -758,7 +818,8 @@ static int position_state_changed_listener(const zmk_event_t *eh) {
     // We make a timer decision before the other key events are handled if the timer would
     // have run out.
     if (ev->timestamp >
-        (undecided_hold_tap->timestamp + undecided_hold_tap->config->tapping_term_ms)) {
+        (undecided_hold_tap->timestamp +
+         tibiboard_effective_term(undecided_hold_tap->config->tapping_term_ms))) {
         decide_hold_tap(undecided_hold_tap, HT_TIMER_EVENT);
     }
 

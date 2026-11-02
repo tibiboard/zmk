@@ -88,20 +88,34 @@ static const struct behavior_parameter_metadata metadata = {
 
 #endif // IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
 
+/* ちびボード: プロファイル操作の確認用フック。実装はシールド側(vibe_handler.c)。
+ * weakなので振動なし構成でもリンクは通る。
+ * - cleared: 削除実行の確認(2秒振動、2026-07-22作者要望)
+ * - select_pressed: 選択キーの「押せた」確認。同じ番号を押し直した時(切替イベントが
+ *   起きない時)も鳴らすため、イベントではなくキー操作そのものにフックする(同日要望) */
+__attribute__((weak)) void tibiboard_on_profile_cleared(bool all) { ARG_UNUSED(all); }
+__attribute__((weak)) void tibiboard_on_profile_select_pressed(uint8_t index) { ARG_UNUSED(index); }
+
 static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
                                      struct zmk_behavior_binding_event event) {
     switch (binding->param1) {
     case BT_CLR_CMD:
         zmk_ble_clear_bonds();
+        tibiboard_on_profile_cleared(false);
         return 0;
     case BT_NXT_CMD:
+        /* ちびボード(2026-08-15): 次へ/前へも「押せた」確認を鳴らす(SELと同じ扱い) */
+        tibiboard_on_profile_select_pressed(0xFF);
         return zmk_ble_prof_next();
     case BT_PRV_CMD:
+        tibiboard_on_profile_select_pressed(0xFF);
         return zmk_ble_prof_prev();
     case BT_SEL_CMD:
+        tibiboard_on_profile_select_pressed(binding->param2);
         return zmk_ble_prof_select(binding->param2);
     case BT_CLR_ALL_CMD:
         zmk_ble_clear_all_bonds();
+        tibiboard_on_profile_cleared(true);
         return 0;
     case BT_DISC_CMD:
         return zmk_ble_prof_disconnect(binding->param2);

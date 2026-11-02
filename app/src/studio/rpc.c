@@ -58,12 +58,21 @@ zmk_studio_Response zmk_rpc_subsystem_delegate_to_subs(const struct zmk_rpc_subs
 static zmk_studio_Response handle_request(const zmk_studio_Request *req) {
     zmk_studio_core_reschedule_lock_timeout();
     struct zmk_rpc_subsystem *sub = find_subsystem_for_choice(req->which_subsystem);
+
+    zmk_studio_Response resp;
     if (!sub) {
         LOG_WRN("No subsystem found for choice %d", req->which_subsystem);
-        return ZMK_RPC_RESPONSE(meta, simple_error, zmk_meta_ErrorConditions_RPC_NOT_FOUND);
+        resp = ZMK_RPC_RESPONSE(meta, simple_error, zmk_meta_ErrorConditions_RPC_NOT_FOUND);
+    } else {
+        resp = sub->func(sub, req);
     }
 
-    zmk_studio_Response resp = sub->func(sub, req);
+    // This must run for BOTH branches above: previously the "no subsystem found" early-return
+    // skipped setting request_id entirely, leaving it at its zero-initialized default. Any
+    // client sending a request for a subsystem/behavior the firmware doesn't understand (e.g.
+    // this app's new "combos" tab probing a device that predates combo support) got back an
+    // error response with request_id 0 instead of the real request's ID, which broke that
+    // client's request/response matching for every future call on the connection.
     resp.type.request_response.request_id = req->request_id;
 
     return resp;
@@ -122,6 +131,7 @@ struct ring_buf *zmk_rpc_get_tx_buf(void) { return &rpc_tx_buf; }
 static bool rpc_tx_buffer_write(pb_ostream_t *stream, const uint8_t *buf, size_t count) {
     void *user_data = stream->state;
     size_t written = 0;
+    int stalled_ms = 0;
 
     bool escape_byte_already_written = false;
     do {
@@ -131,8 +141,18 @@ static bool rpc_tx_buffer_write(pb_ostream_t *stream, const uint8_t *buf, size_t
         uint32_t claim_len = ring_buf_put_claim(&rpc_tx_buf, &write_buf, count - written);
 
         if (claim_len == 0) {
+            /* tibiboard30 fix: 上流は満杯時に無限ビジースピンしてスレッドを凍結させて
+             * いた(実害: USB給電のみ+クライアント未接続で通知が流れると、システム
+             * ワークキューごと固まり振動OFFが実行されずモーターが回りっぱなし)。
+             * 少し待っても排水されなければこのメッセージは諦める(受信側のフレーミングは
+             * 次のSOFで回復する)。 */
+            if (++stalled_ms > 200) {
+                return false;
+            }
+            k_sleep(K_MSEC(1));
             continue;
         }
+        stalled_ms = 0;
 
         int escapes_written = 0;
         for (int i = 0; i < claim_len && write_idx < claim_len; i++) {
@@ -176,7 +196,25 @@ static pb_ostream_t pb_ostream_for_tx_buf(void *user_data) {
     return stream;
 }
 
+/* tibiboard30 fix: SOF/EOFマーカーの書き込みも満杯を考慮する。上流はring_buf_putの
+ * 戻り値を見ておらず、TXリング満杯時にマーカーだけ黙って落ちてフレーム構造が崩れ、
+ * 受信側のデコーダが次のメッセージまで道連れにする余地があった。ペイロード書き込み
+ * (rpc_tx_buffer_write)と同じ「最大200ms待って諦める」方針で書き込む。 */
+static bool rpc_put_framing_byte(uint8_t framing_byte) {
+    int stalled_ms = 0;
+    while (ring_buf_put(&rpc_tx_buf, &framing_byte, 1) != 1) {
+        if (++stalled_ms > 200) {
+            LOG_WRN("TX ring full, dropping framing byte 0x%02x", framing_byte);
+            return false;
+        }
+        k_sleep(K_MSEC(1));
+    }
+    return true;
+}
+
 static int send_response(const zmk_studio_Response *resp) {
+    int ret = 0;
+
     k_mutex_lock(&rpc_transport_mutex, K_FOREVER);
 
     if (!selected_transport) {
@@ -187,8 +225,11 @@ static int send_response(const zmk_studio_Response *resp) {
 
     pb_ostream_t stream = pb_ostream_for_tx_buf(user_data);
 
-    uint8_t framing_byte = FRAMING_SOF;
-    ring_buf_put(&rpc_tx_buf, &framing_byte, 1);
+    if (!rpc_put_framing_byte(FRAMING_SOF)) {
+        /* 何も書けていないので、このメッセージを丸ごと諦めれば無害 */
+        ret = -EAGAIN;
+        goto exit;
+    }
 
     selected_transport->tx_notify(&rpc_tx_buf, 1, false, user_data);
 
@@ -199,17 +240,22 @@ static int send_response(const zmk_studio_Response *resp) {
 #if !IS_ENABLED(CONFIG_NANOPB_NO_ERRMSG)
         LOG_ERR("Failed to encode the message %s", stream.errmsg);
 #endif // !IS_ENABLED(CONFIG_NANOPB_NO_ERRMSG)
-        return -EINVAL;
+        // Fall through (rather than returning here) on purpose: the SOF byte — and possibly a
+        // partial payload — is already queued in the TX ring, so bailing out without an EOF
+        // would leave the client's framing decoder stuck mid-frame, where the NEXT response's
+        // SOF looks like a protocol error and kills the whole client connection. Worse, the
+        // early return skipped k_mutex_unlock, so any other thread sending (e.g. the event
+        // thread raising a notification) would then block on rpc_transport_mutex forever.
+        ret = -EINVAL;
     }
 
-    framing_byte = FRAMING_EOF;
-    ring_buf_put(&rpc_tx_buf, &framing_byte, 1);
+    rpc_put_framing_byte(FRAMING_EOF);
 
     selected_transport->tx_notify(&rpc_tx_buf, 1, true, user_data);
 
 exit:
     k_mutex_unlock(&rpc_transport_mutex);
-    return 0;
+    return ret;
 }
 
 static void rpc_main(void) {
@@ -313,6 +359,26 @@ static int zmk_rpc_init(void) {
 
 SYS_INIT(zmk_rpc_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
+/* tibiboard30 fix: 通知専用の送信スレッド。イベント発生スレッド(キー入力処理等)からは
+ * 待ち行列に積むだけにして、実際のエンコード/送信(詰まると待たされる)はここで行う。
+ * これで送信の渋滞が入力・振動などに波及しない。行列が満杯なら新しい通知は捨てる。 */
+K_MSGQ_DEFINE(rpc_notify_msgq, sizeof(zmk_studio_Notification), 8, 4);
+
+static void rpc_notify_main(void *_a, void *_b, void *_c) {
+    zmk_studio_Notification n;
+    while (true) {
+        k_msgq_get(&rpc_notify_msgq, &n, K_FOREVER);
+
+        zmk_studio_Response resp = zmk_studio_Response_init_zero;
+        resp.which_type = zmk_studio_Response_notification_tag;
+        resp.type.notification = n;
+        send_response(&resp);
+    }
+}
+
+K_THREAD_DEFINE(studio_rpc_notify_thread, 3072, rpc_notify_main, NULL, NULL, NULL,
+                K_LOWEST_APPLICATION_THREAD_PRIO, 0, 0);
+
 static int studio_rpc_listener_cb(const zmk_event_t *eh) {
     struct zmk_endpoint_changed *ep_changed = as_zmk_endpoint_changed(eh);
     if (ep_changed) {
@@ -322,10 +388,14 @@ static int studio_rpc_listener_cb(const zmk_event_t *eh) {
 
     struct zmk_studio_rpc_notification *rpc_notify = as_zmk_studio_rpc_notification(eh);
     if (rpc_notify) {
-        zmk_studio_Response resp = zmk_studio_Response_init_zero;
-        resp.which_type = zmk_studio_Response_notification_tag;
-        resp.type.notification = rpc_notify->notification;
-        send_response(&resp);
+        /* tibiboard30 fix: 通知をこのスレッド(イベントを起こしたスレッド=キー入力の
+         * 処理スレッド等)で直接送信しない。送信が詰まる(BLEが遅い/クライアント未接続で
+         * TXリングが排水されない等)と入力処理ごと固まるため。専用スレッドの待ち行列に
+         * 積むだけにして即座に戻る。満杯なら捨てる(通知は損失許容)。 */
+        if (ring_buf_space_get(&rpc_tx_buf) < CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE / 4) {
+            return ZMK_EV_EVENT_BUBBLE;
+        }
+        k_msgq_put(&rpc_notify_msgq, &rpc_notify->notification, K_NO_WAIT);
         return ZMK_EV_EVENT_BUBBLE;
     }
 

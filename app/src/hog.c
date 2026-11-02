@@ -231,8 +231,12 @@ static ssize_t write_hids_mouse_feature_report(struct bt_conn *conn,
 //     return 0;
 // }
 
+/* tibiboard (2026-10-17 FW51): 文字の受け取りの登録(購読)が変わった記録の入口。ここでは何もしない */
+__weak void tibiboard_diag_hid_sub(uint16_t value) { ARG_UNUSED(value); }
+
 static void input_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value) {
     host_requests_notification = (value == BT_GATT_CCC_NOTIFY) ? 1 : 0;
+    tibiboard_diag_hid_sub(value);
 }
 
 static ssize_t write_ctrl_point(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -300,6 +304,8 @@ BT_GATT_SERVICE_DEFINE(
     BT_GATT_CHARACTERISTIC(BT_UUID_HIDS_CTRL_POINT, BT_GATT_CHRC_WRITE_WITHOUT_RESP,
                            BT_GATT_PERM_WRITE, NULL, write_ctrl_point, &ctrl_point));
 
+void tibiboard_diag_hid(int what, int err, struct bt_conn *conn);
+
 K_THREAD_STACK_DEFINE(hog_q_stack, CONFIG_ZMK_BLE_THREAD_STACK_SIZE);
 
 struct k_work_q hog_work_q;
@@ -313,6 +319,7 @@ void send_keyboard_report_callback(struct k_work *work) {
     while (k_msgq_get(&zmk_hog_keyboard_msgq, &report, K_NO_WAIT) == 0) {
         struct bt_conn *conn = zmk_ble_active_profile_conn();
         if (conn == NULL) {
+            tibiboard_diag_hid(0, -ENOTCONN, NULL);
             return;
         }
 
@@ -323,6 +330,7 @@ void send_keyboard_report_callback(struct k_work *work) {
         };
 
         int err = bt_gatt_notify_cb(conn, &notify_params);
+        tibiboard_diag_hid(0, err, conn);
         if (err == -EPERM) {
             bt_conn_set_security(conn, BT_SECURITY_L2);
         } else if (err) {
@@ -335,11 +343,19 @@ void send_keyboard_report_callback(struct k_work *work) {
 
 K_WORK_DEFINE(hog_keyboard_work, send_keyboard_report_callback);
 
+/* tibiboard (2026-10-11 FW49): 文字を送った結果を試験用の記録へ渡す。シールドが上書きする弱い関数 */
+__weak void tibiboard_diag_hid(int what, int err, struct bt_conn *conn) {
+    ARG_UNUSED(what);
+    ARG_UNUSED(err);
+    ARG_UNUSED(conn);
+}
+
 int zmk_hog_send_keyboard_report(struct zmk_hid_keyboard_report_body *report) {
     int err = k_msgq_put(&zmk_hog_keyboard_msgq, report, K_MSEC(100));
     if (err) {
         switch (err) {
         case -EAGAIN: {
+            tibiboard_diag_hid(2, err, NULL);
             LOG_WRN("Keyboard message queue full, popping first message and queueing again");
             struct zmk_hid_keyboard_report_body discarded_report;
             k_msgq_get(&zmk_hog_keyboard_msgq, &discarded_report, K_NO_WAIT);

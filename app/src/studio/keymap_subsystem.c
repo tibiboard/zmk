@@ -537,6 +537,9 @@ ZMK_RPC_SUBSYSTEM_HANDLER(keymap, remove_layer, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, restore_layer, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, set_layer_props, ZMK_STUDIO_RPC_HANDLER_SECURED);
 
-static int event_mapper(const zmk_event_t *eh, zmk_studio_Notification *n) { return 0; }
+/* tibiboard30 fix: 上流のスタブは0(=マップ成功)を返していたため、マッパー巡回が
+ * ここで打ち切られて空の通知が送られ、後続(status等)のマッパーに一切イベントが
+ * 届かなかった。マップしないなら-ENOTSUPを返すのが正しい。 */
+static int event_mapper(const zmk_event_t *eh, zmk_studio_Notification *n) { return -ENOTSUP; }
 
 ZMK_RPC_EVENT_MAPPER(keymap, event_mapper);

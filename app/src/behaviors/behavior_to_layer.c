@@ -13,6 +13,10 @@
 #include <zmk/keymap.h>
 #include <zmk/behavior.h>
 
+/* ちびボード FW46: weak の既定(何もしない)は behavior_toggle_layer.c に1つだけ置く */
+void tibiboard_layer_sticky_begin(void);
+void tibiboard_layer_sticky_end(void);
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
@@ -25,7 +29,9 @@ static int to_keymap_binding_pressed(struct zmk_behavior_binding *binding,
                                      struct zmk_behavior_binding_event event) {
     LOG_DBG("position %d layer %d", event.position, binding->param1);
     const struct behavior_to_config *cfg = zmk_behavior_get_binding(binding->behavior_dev)->config;
+    tibiboard_layer_sticky_begin(); /* ちびボード FW46: 戻る時の振動用の印(behavior_toggle_layer.c 参照) */
     zmk_keymap_layer_to(binding->param1, cfg->locking);
+    tibiboard_layer_sticky_end();
     return ZMK_BEHAVIOR_OPAQUE;
 }
 

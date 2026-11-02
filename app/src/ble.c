@@ -55,6 +55,28 @@ enum advertising_type {
 
 #define CURR_ADV(adv) (adv << 4)
 
+/* tibiboard (2026-10-17 FW51): Bluetooth の接続を調べるための記録の入口。ここでは何もしない(動きは変えない)。
+ * シールド(vibe_handler.c)が中身を書き、試験用のファームだけ記録に残す */
+__weak void tibiboard_diag_adv(int status, int active, int err) {
+    ARG_UNUSED(status);
+    ARG_UNUSED(active);
+    ARG_UNUSED(err);
+}
+__weak void tibiboard_diag_pair(struct bt_conn *conn, int what, int active) {
+    ARG_UNUSED(conn);
+    ARG_UNUSED(what);
+    ARG_UNUSED(active);
+}
+__weak void tibiboard_diag_conn_active(struct bt_conn *conn, bool active, uint8_t err) {
+    ARG_UNUSED(conn);
+    ARG_UNUSED(active);
+    ARG_UNUSED(err);
+}
+__weak void tibiboard_diag_profile_save(int index, int err) {
+    ARG_UNUSED(index);
+    ARG_UNUSED(err);
+}
+
 #define ZMK_ADV_CONN_NAME                                                                          \
     BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_USE_NAME | BT_LE_ADV_OPT_FORCE_NAME_IN_AD,  \
                     BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL)
@@ -113,7 +135,8 @@ void set_profile_address(uint8_t index, const bt_addr_le_t *addr) {
     sprintf(setting_name, "ble/profiles/%d", index);
     LOG_DBG("Setting profile addr for %s to %s", setting_name, addr_str);
 #if IS_ENABLED(CONFIG_SETTINGS)
-    settings_save_one(setting_name, &profiles[index], sizeof(struct zmk_ble_profile));
+    int save_err = settings_save_one(setting_name, &profiles[index], sizeof(struct zmk_ble_profile));
+    tibiboard_diag_profile_save(index, save_err);
 #endif
     k_work_submit(&raise_profile_changed_event_work);
 }
@@ -174,7 +197,7 @@ bool zmk_ble_profile_is_connected(uint8_t index) {
     }                                                                                              \
     advertising_status = ZMK_ADV_CONN;
 
-int update_advertising(void) {
+static int update_advertising_inner(void) {
     int err = 0;
     bt_addr_le_t *addr;
     struct bt_conn *conn;
@@ -218,6 +241,12 @@ int update_advertising(void) {
 
     return 0;
 };
+
+int update_advertising(void) {
+    int err = update_advertising_inner();
+    tibiboard_diag_adv((int)advertising_status, (int)active_profile, err);
+    return err;
+}
 
 static void update_advertising_callback(struct k_work *work) { update_advertising(); }
 
@@ -514,11 +543,13 @@ static void connected(struct bt_conn *conn, uint8_t err) {
 
     if (err) {
         LOG_WRN("Failed to connect to %s (%u)", addr, err);
+        tibiboard_diag_conn_active(conn, false, err);
         update_advertising();
         return;
     }
 
     LOG_DBG("Connected %s", addr);
+    tibiboard_diag_conn_active(conn, is_conn_active_profile(conn), 0);
 
     update_advertising();
 
@@ -636,9 +667,13 @@ static enum bt_security_err auth_pairing_accept(struct bt_conn *conn,
     LOG_DBG("role %d, open? %s", info.role, zmk_ble_active_profile_is_open() ? "yes" : "no");
     if (info.role == BT_CONN_ROLE_PERIPHERAL && !pairing_allowed_for_current_profile(conn)) {
         LOG_WRN("Rejecting pairing request to taken profile %d", active_profile);
+        tibiboard_diag_pair(conn, 2, active_profile);
         return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
     }
 
+    if (info.role == BT_CONN_ROLE_PERIPHERAL) {
+        tibiboard_diag_pair(conn, 1, active_profile);
+    }
     return BT_SECURITY_ERR_SUCCESS;
 };
 
@@ -657,6 +692,7 @@ static void auth_pairing_complete(struct bt_conn *conn, bool bonded) {
 
     if (!pairing_allowed_for_current_profile(conn)) {
         LOG_ERR("Pairing completed but current profile is not open: %s", addr);
+        tibiboard_diag_pair(conn, 5, active_profile);
         bt_unpair(BT_ID_DEFAULT, dst);
         return;
     }
